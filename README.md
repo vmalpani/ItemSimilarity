@@ -1,9 +1,9 @@
 # ItemSimilarity
-Given item description, find other similar items
+Given item description, find other similar items using tf-idf vectorization
 
 Uncompress the data files:
 ```
-unzip file.zip
+unzip data.zip
 ```
 Run the script:
 ```
