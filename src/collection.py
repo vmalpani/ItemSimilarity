@@ -7,6 +7,7 @@ import pysparnn as snn
 
 import helper
 
+import argparse
 import os
 import string
 import warnings
@@ -115,5 +116,14 @@ if __name__ == "__main__":
     'mp3_players': Time to build search index ~ 2.4s
                    Time for nn lookup ~ 100s / 24691 ~ 4ms
     """
-    c = Collection('mp3_players')
-    c.top_similar_items()
+    item_categories = ['cases', 'cell_phones', 'laptops', 'mp3_players']
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--category', required=True,
+                        help='Enter item category: cases, cell_phones, laptops, mp3_players')  # noqa
+    args = parser.parse_args()
+    if args.category in item_categories:
+        c = Collection(args.category)
+        c.top_similar_items()
+    else:
+        print "Incorrect category."
+        print "Please choose from cases, cell_phones, laptops, mp3_players."
