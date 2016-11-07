@@ -1,0 +1,3 @@
+[submodule "pysparnn"]
+	path = pysparnn
+	url = https://github.com/facebookresearch/pysparnn.git
