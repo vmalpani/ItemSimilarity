@@ -88,3 +88,8 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+data/*.txt
+data/*.npz
+results
+tmp
