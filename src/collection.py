@@ -100,6 +100,9 @@ class Collection:
         """Write cluster members to a file"""
         clabels = np.unique(preds)
         # for each cluster print out the items that belong to it
+        # FIXME: we open the file in append mode to ensure that we can write
+        # outlier clusters to the same file. Make sure you delete the file
+        # before a fresh run.
         with open(RESULT_PATH % (self.name + '_clusters'), 'a') as fp:
             for i in range(clabels.shape[0]):
                 # skip for noisy outliers indicated with cluster number -1
@@ -133,11 +136,8 @@ class Collection:
         dist = 1 - cosine_similarity(subset_tfidf)
 
         # step 1: use density clustering
-        print "applying dbscan clustering..."
-        t1 = time.time()
         clust = DBSCAN(eps=thresh, min_samples=n_samples, metric="precomputed")
         clust.fit(dist)
-        print time.time() - t1
         return clust.labels_
 
     def _apprx_nn_search(self, input_vecs, data_to_return, predict_vecs,
@@ -181,9 +181,8 @@ class Collection:
 
         # sample 20k idxs to generate clusters
         first_idxs = perm_idxs[:20000]
-        rest_idxs = perm_idxs[20000:21000]
+        rest_idxs = perm_idxs[20000:]
 
-        print "computing distance from cosine similarity..."
         # create a distance metric from cosine similarity
         first_preds = self._run_db_scan(first_idxs, 0.2, 5)
 
@@ -192,7 +191,6 @@ class Collection:
 
         # if we have some items left after dbscan
         if rest_idxs and len(rest_idxs) > 0:
-            print "building search index from first chunk..."
             # get rid of noisy outliers
             pruned_pred = []
             pruned_idx = []
@@ -200,24 +198,11 @@ class Collection:
                 if _pred >= 0:
                     pruned_pred.append(_pred)
                     pruned_idx.append(_idx)
-            t2 = time.time()
 
             result = self._apprx_nn_search(self.tfidf_matrix[pruned_idx],
                                            pruned_pred,
                                            self.tfidf_matrix[rest_idxs],
                                            get_distance=True)
-            print time.time() - t2
-
-            # results are returned as list of tuples [(dist, cluster_num), ...]
-            # result = cp.search(self.tfidf_matrix[rest_idxs], k=10,
-            #                   k_clusters=5, return_distance=True)
-
-            # result = cp.search(self.tfidf_matrix[rest_idxs], k=20,
-            #                   k_clusters=15, return_distance=False)
-            # print time.time() - t3
-
-            t4 = time.time()
-            print "label the remaining item by max voting"
 
             # step 2: assign each example a cluster by max voting
             p = multiprocessing.Pool(multiprocessing.cpu_count())
@@ -225,7 +210,6 @@ class Collection:
             p.close()
             p.join()
 
-            print time.time() - t4
             # merge back results from step 1 and step 2
             all_idxs += rest_idxs
             all_preds = np.hstack((first_preds, rest_preds))
@@ -244,7 +228,8 @@ class Collection:
         self._write_clusters(all_preds, all_idxs)
 
         # outliers pass clusters
-        self._write_clusters(outliers_preds, outlier_idxs, suffix='Outliers')
+        self._write_clusters(outliers_preds, outlier_idxs,
+                             suffix='Outliers')
 
 
 if __name__ == "__main__":
@@ -277,15 +262,6 @@ if __name__ == "__main__":
               Time for dbscan ~ 3s
               Time to build the search index ~ 1s
               Time per nn lookup: 858s / 89999 ~  9.5ms
-
-    'laptops':
-              Time for dbscan ~ 1.6s
-              Time to build the search index ~ 0.2s
-              Time per nn lookup: 130s / 36638 ~  3ms
-
-    'mp3_players':  Time for dbscan ~ 2s
-              Time to build the search index ~ 0.5s
-              Time per nn lookup: 10.74s / 1000 ~  10ms
     """
     item_categories = ['cases', 'cell_phones', 'laptops', 'mp3_players']
     parser = argparse.ArgumentParser()
@@ -297,12 +273,12 @@ if __name__ == "__main__":
         print "Generating top 10 similar items...\n"
         t1 = time.time()
         c.top_similar_items()
-        print "time take for similarity: %s" % str(time.time()-t1)
+        print "Time taken for similarity: %s" % str(time.time()-t1)
 
         print "Clustering similar items together...\n"
         t2 = time.time()
         c.generate_clusters()
-        print "time take for clustering: %s" % str(time.time()-t2)
+        print "Time taken for clustering: %s" % str(time.time()-t2)
     else:
         print "Incorrect category."
         print "Please choose from cases, cell_phones, laptops, mp3_players."
