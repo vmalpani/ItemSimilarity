@@ -38,6 +38,33 @@ def _max_vote(result):
             return -1
 
 
+def _tokenize(sentence):
+    """Tokenizer used by tfidf vectorizer"""
+    stopwords = set(sw.words('english'))
+    punct = set(string.punctuation)
+    tokens = []
+    # Break the sentence into tokens
+    for token in wordpunct_tokenize(sentence):
+        # Apply preprocessing to the token
+        token = token.lower()
+        token = token.strip()
+        token = token.strip('_')
+        token = token.strip('*')
+
+        # If stopword, ignore token and continue
+        if token in stopwords:
+            continue
+
+        # If punctuation, ignore token and continue
+        if all(char in punct for char in token):
+            continue
+
+        # Stem or lemmatize the token if needed
+        # lemma = self.lemmatize(token, tag)
+        tokens.append(token)
+    return tokens
+
+
 class Collection:
     """Base class for Collections"""
 
@@ -86,39 +113,13 @@ class Collection:
                                            self.data[perm_idxs[cmem_id]]))
                 fp.write('\n')
 
-    def _tokenize(self, sentence):
-        """Tokenizer used by tfidf vectorizer"""
-        stopwords = set(sw.words('english'))
-        punct = set(string.punctuation)
-        tokens = []
-        # Break the sentence into tokens
-        for token in wordpunct_tokenize(sentence):
-            # Apply preprocessing to the token
-            token = token.lower()
-            token = token.strip()
-            token = token.strip('_')
-            token = token.strip('*')
-
-            # If stopword, ignore token and continue
-            if token in stopwords:
-                continue
-
-            # If punctuation, ignore token and continue
-            if all(char in punct for char in token):
-                continue
-
-            # Stem or lemmatize the token if needed
-            # lemma = self.lemmatize(token, tag)
-            tokens.append(token)
-        return tokens
-
     def _generate_tfidf_matrix(self):
         """Load precomputed tfidf matrix if present or compute a new one"""
         if os.path.exists("data/tfidf_matrix_%s.npz" % self.name):
             tfidf_matrix = helper.load_sparse_csr("data/tfidf_matrix_%s.npz"
                                                   % self.name)
         else:
-            tfidf = TfidfVectorizer(tokenizer=self._tokenize,
+            tfidf = TfidfVectorizer(tokenizer=_tokenize,
                                     stop_words='english')
             tfidf.fit(self.data)
             tfidf_matrix = tfidf.transform(self.data)
@@ -139,12 +140,19 @@ class Collection:
         print time.time() - t1
         return clust.labels_
 
-    def apprx_nn_search(self, input_vecs, data_to_return, predict_vecs,
-                        result_size=10, num_clusters=5, get_distance=False):
-        # nn lookup
-        # k: number of results required (one is added to result_size as the
-        #    first item in the result will be the query item itself)
-        # k_clusters: number of clusters to search at each level
+    def _apprx_nn_search(self, input_vecs, data_to_return, predict_vecs,
+                         result_size=10, num_clusters=5, get_distance=False):
+        """
+        Builds a search index from the input vectors and uses in for fast
+        nn lookup of prediction vectors
+        input_vecs: sparse tfidf vectors of input data
+        data_to_return: data to be returned corresponding to the nn returned
+                        ex. we use it to return cluster number or item_id
+        predict_vecs: sparse tfidf vectors of nn query data
+        result_size: number of results to be returned
+        num_clusters: number of clusters to be searched at each level
+        get_distance: if true, returns the distance of the nearest neighbors
+        """
         cp = snn.ClusterIndex(input_vecs, data_to_return)
         result = cp.search(predict_vecs, k=result_size+1,
                            k_clusters=num_clusters,
@@ -152,19 +160,21 @@ class Collection:
         return result
 
     def top_similar_items(self, result_size=10):
-        # build search index using pysparnn
-        cp = snn.ClusterIndex(self.tfidf_matrix, zip(self.ids, self.data))
-
-        # nn lookup
-        # k: number of results required (one is added to result_size as the
-        #    first item in the result will be the query item itself)
-        # k_clusters: number of clusters to search at each level
-        result = cp.search(self.tfidf_matrix, k=result_size+1, k_clusters=5,
-                           return_distance=False)
-
+        """
+        Generates top k similar items for each item in the whole collection
+        using pysparnn which implements clustering based approximate nn lookup
+        """
+        result = self._apprx_nn_search(self.tfidf_matrix,
+                                       zip(self.ids, self.data),
+                                       self.tfidf_matrix, result_size)
         self._write_results(result)
 
     def generate_clusters(self):
+        """
+        Clusters similar items using db scan on tfidf vectors of a subset of
+        the collection and does assigns the left out items to clusters via
+        approximate nearest neighbor search
+        """
         # shuffle idxs over all the items in the file
         perm_idxs = range(self.tfidf_matrix.shape[0])
         random.shuffle(perm_idxs)
@@ -192,16 +202,16 @@ class Collection:
                     pruned_idx.append(_idx)
             t2 = time.time()
 
-            result = self.apprx_nn_search(self.tfidf_matrix[pruned_idx],
-                                          pruned_pred,
-                                          self.tfidf_matrix[rest_idxs],
-                                          get_distance=True)
+            result = self._apprx_nn_search(self.tfidf_matrix[pruned_idx],
+                                           pruned_pred,
+                                           self.tfidf_matrix[rest_idxs],
+                                           get_distance=True)
             print time.time() - t2
 
             # results are returned as list of tuples [(dist, cluster_num), ...]
             # result = cp.search(self.tfidf_matrix[rest_idxs], k=10,
             #                   k_clusters=5, return_distance=True)
-            
+
             # result = cp.search(self.tfidf_matrix[rest_idxs], k=20,
             #                   k_clusters=15, return_distance=False)
             # print time.time() - t3
@@ -285,9 +295,9 @@ if __name__ == "__main__":
     if args.category in item_categories:
         c = Collection(args.category)
         print "Generating top 10 similar items...\n"
-        # t1 = time.time()
-        # c.top_similar_items()
-        # print "time take for similarity: %s" % str(time.time()-t1)
+        t1 = time.time()
+        c.top_similar_items()
+        print "time take for similarity: %s" % str(time.time()-t1)
 
         print "Clustering similar items together...\n"
         t2 = time.time()
