@@ -129,6 +129,31 @@ class Collection:
                                    tfidf_matrix)
         return tfidf_matrix
 
+    def _run_db_scan(self, idxs, thresh=0.4, n_samples=5):
+        subset_tfidf = self.tfidf_matrix[idxs]
+        dist = 1 - cosine_similarity(subset_tfidf)
+
+        # step 1: use density clustering
+        print "applying dbscan clustering..."
+        t1 = time.time()
+        clust = DBSCAN(eps=thresh, min_samples=n_samples, metric="precomputed")
+        clust.fit(dist)
+        print time.time() - t1
+        return clust.labels_
+
+    """
+    def apprx_cluster_search(self, input_vecs, data_to_return, predict_vecs,
+                             result_size=10, k_clusters=5, get_distance=False):
+        # nn lookup
+        # k: number of results required (one is added to result_size as the
+        #    first item in the result will be the query item itself)
+        # k_clusters: number of clusters to search at each level
+        cp = snn.ClusterIndex(input_vecs, data_to_return)
+        result = cp.search(predict_vecs, k=result_size+1, k_clusters=5,
+                           return_distance=False)
+        return result
+    """
+
     def top_similar_items(self, result_size=10):
         # build search index using pysparnn
         cp = snn.ClusterIndex(self.tfidf_matrix, zip(self.ids, self.data))
@@ -149,21 +174,11 @@ class Collection:
 
         # sample 20k idxs to generate clusters
         first_idxs = perm_idxs[:20000]
-        rest_idxs = perm_idxs[20000:25000]
+        rest_idxs = perm_idxs[20000:21000]
 
         print "computing distance from cosine similarity..."
         # create a distance metric from cosine similarity
-        subset_tfidf = self.tfidf_matrix[first_idxs]
-        dist = 1 - cosine_similarity(subset_tfidf)
-
-        # step 1: use density clustering with similarity threshold 0.4
-        # and min number of samples 5 for a valid cluster
-        print "applying dbscan clustering..."
-        t1 = time.time()
-        clust = DBSCAN(eps=thresh, min_samples=n_samples, metric="precomputed")
-        clust.fit(dist)
-        print time.time() - t1
-        first_preds = clust.labels_
+        first_preds = self._run_db_scan(first_idxs)
 
         all_idxs = first_idxs
         all_preds = first_preds
@@ -217,16 +232,7 @@ class Collection:
         # as none of its members were choosen in the initial clustering phase
         outlier_idxs = np.array(perm_idxs)[all_preds == -1]
         if len(outlier_idxs) > 0:
-            outliers_tfidf = self.tfidf_matrix[outlier_idxs]
-            dist_outliers = 1 - cosine_similarity(outliers_tfidf)
-
-            print "applying dbscan on outliers..."
-            t4 = time.time()
-            clust_outliers = DBSCAN(eps=0.2, min_samples=5,
-                                    metric="precomputed")
-            clust_outliers.fit(dist_outliers)
-            print time.time() - t4
-            outliers_preds = clust_outliers.labels_
+            outliers_preds = self._run_db_scan(outlier_idxs)
 
         # write main pass clusters
         self._write_clusters(all_preds, all_idxs)
@@ -258,21 +264,22 @@ if __name__ == "__main__":
               Thresholds: 0.4, 5, 15, 20
               Time for dbscan ~ 2s
               Time to build the search index ~ 0.5s
-              Time for nn lookup: 915s / 89999 ~ 10ms/item
+              Time per nn lookup: 915s / 89999 ~ 10ms
 
     'cell_phones':
               Thresholds: 0.2, 5, 10, 5, 0.6
               Time for dbscan ~ 3s
               Time to build the search index ~ 1s
-              Time for nn lookup: 858s / 89999 ~  9.5ms
+              Time per nn lookup: 858s / 89999 ~  9.5ms
 
-    'laptops':  Time for dbscan ~ 2s
-              Time to build the search index ~ 0.5s
-              Time for nn lookup: 10.74s / 89999 ~  0.12ms
+    'laptops':
+              Time for dbscan ~ 1.6s
+              Time to build the search index ~ 0.2s
+              Time per nn lookup: 130s / 36638 ~  3ms
 
     'mp3_players':  Time for dbscan ~ 2s
               Time to build the search index ~ 0.5s
-              Time for nn lookup: 10.74s / 1000 ~  10ms
+              Time per nn lookup: 10.74s / 1000 ~  10ms
     """
     item_categories = ['cases', 'cell_phones', 'laptops', 'mp3_players']
     parser = argparse.ArgumentParser()
