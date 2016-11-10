@@ -4,6 +4,7 @@ from sklearn.cluster import DBSCAN
 
 from nltk.corpus import stopwords as sw
 from nltk import wordpunct_tokenize
+import multiprocessing
 import pysparnn as snn
 import numpy as np
 
@@ -20,18 +21,35 @@ warnings.filterwarnings("ignore")
 
 FILE_PATH = 'data/%s.txt'
 RESULT_PATH = 'results/%s.txt'
+VOTING_THRESHOLD = 0.6
+
+
+def _max_vote(result):
+    """return cluster with max votes having similarity above threshold"""
+    # if min neighbor distance too high, consider noise
+    if result[0][0] > VOTING_THRESHOLD:
+        return -1
+    else:
+        # gather votes from candidates that are similar enough
+        c_labels = [x[1] for x in result if x[0] < VOTING_THRESHOLD]
+        if len(c_labels) > 0:
+            return max(set(c_labels), key=c_labels.count)
+        else:
+            return -1
 
 
 class Collection:
+    """Base class for Collections"""
+
     def __init__(self, name):
         self.name = name
         self.ids, self.data = self._parse_file()
-        self.tfidf = TfidfVectorizer(tokenizer=self._tokenize,
-                                     stop_words='english')
+        # self.tfidf = TfidfVectorizer(tokenizer=self._tokenize,
+        #                             stop_words='english')
         self.tfidf_matrix = self._generate_tfidf_matrix()
 
     def _parse_file(self):
-        # parse the input txt file
+        """Parse the input txt file into item ids and description"""
         ids = []
         data = []
         with open(FILE_PATH % self.name) as fp:
@@ -43,6 +61,7 @@ class Collection:
         return ids, data
 
     def _write_results(self, result):
+        """Write similar items to a file"""
         with open(RESULT_PATH % (self.name + '_results'), 'w') as fp:
             for item_id, title, similar_items in zip(self.ids,
                                                      self.data,
@@ -52,23 +71,25 @@ class Collection:
                 for i in similar_items[1:]:
                     fp.write('%s\t%s\n' % (i[0], i[1]))
 
-    def _write_clusters(self, preds, perm_idxs):
+    def _write_clusters(self, preds, perm_idxs, suffix=''):
+        """Write cluster members to a file"""
         clabels = np.unique(preds)
         # for each cluster print out the items that belong to it
-        with open(RESULT_PATH % (self.name + '_clusters'), 'w') as fp:
+        with open(RESULT_PATH % (self.name + '_clusters'), 'a') as fp:
             for i in range(clabels.shape[0]):
                 # skip for noisy outliers indicated with cluster number -1
                 if clabels[i] < 0:
                     continue
 
                 cmem_ids = np.where(preds == clabels[i])[0]
-                fp.write('Cluster#%d\n' % i)
+                fp.write('Cluster#%s#%d\n' % (suffix, i))
                 for cmem_id in cmem_ids:
                     fp.write('%d\t%s\n' % (self.ids[perm_idxs[cmem_id]],
                                            self.data[perm_idxs[cmem_id]]))
                 fp.write('\n')
 
     def _tokenize(self, sentence):
+        """Tokenizer used by tfidf vectorizer"""
         stopwords = set(sw.words('english'))
         punct = set(string.punctuation)
         tokens = []
@@ -100,8 +121,10 @@ class Collection:
             tfidf_matrix = helper.load_sparse_csr("data/tfidf_matrix_%s.npz"
                                                   % self.name)
         else:
-            self.tfidf.fit(self.data)
-            tfidf_matrix = self.tfidf.transform(self.data)
+            tfidf = TfidfVectorizer(tokenizer=self._tokenize,
+                                    stop_words='english')
+            tfidf.fit(self.data)
+            tfidf_matrix = tfidf.transform(self.data)
             helper.save_sparse_csr("data/tfidf_matrix_%s.npz" % self.name,
                                    tfidf_matrix)
         return tfidf_matrix
@@ -126,7 +149,7 @@ class Collection:
 
         # sample 20k idxs to generate clusters
         first_idxs = perm_idxs[:20000]
-        rest_idxs = perm_idxs[20000:]
+        rest_idxs = perm_idxs[20000:25000]
 
         print "computing distance from cosine similarity..."
         # create a distance metric from cosine similarity
@@ -146,7 +169,7 @@ class Collection:
         all_preds = first_preds
 
         # if we have some items left after dbscan
-        if len(rest_idxs) > 0:
+        if rest_idxs and len(rest_idxs) > 0:
             print "building search index from first chunk..."
             # get rid of noisy outliers
             pruned_pred = []
@@ -163,24 +186,53 @@ class Collection:
             # find the k most similar items for each of the remaining items
             print "find k nearest neighbors of each of the remaining items..."
             t3 = time.time()
-            result = cp.search(self.tfidf_matrix[rest_idxs], k=20,
-                               k_clusters=15, return_distance=False)
+
+            # results are returned as list of tuples [(dist, cluster_num), ...]
+            result = cp.search(self.tfidf_matrix[rest_idxs], k=10,
+                               k_clusters=5, return_distance=True)
+
+            # result = cp.search(self.tfidf_matrix[rest_idxs], k=20,
+            #                   k_clusters=15, return_distance=False)
             print time.time() - t3
 
+            t4 = time.time()
             print "label the remaining item by max voting"
-            # step 2: assign each example a cluster by max voting
-            rest_preds = [max(set(i), key=i.count) for i in result]
 
+            # step 2: assign each example a cluster by max voting
+            p = multiprocessing.Pool(multiprocessing.cpu_count())
+            rest_preds = p.map(_max_vote, result)
+            p.close()
+            p.join()
+
+            print time.time() - t4
             # merge back results from step 1 and step 2
             all_idxs += rest_idxs
             all_preds = np.hstack((first_preds, rest_preds))
 
-            print zip(rest_preds, np.array(self.data)[rest_idxs])[:20]
+            # print zip(rest_preds, np.array(self.data)[rest_idxs])[:20]
 
-        # assert all_idxs == perm_idxs
         assert len(all_idxs) == all_preds.shape[0]
 
+        # last pass to check if we mistook a cluster altogether as outlier
+        # as none of its members were choosen in the initial clustering phase
+        outlier_idxs = np.array(perm_idxs)[all_preds == -1]
+        if len(outlier_idxs) > 0:
+            outliers_tfidf = self.tfidf_matrix[outlier_idxs]
+            dist_outliers = 1 - cosine_similarity(outliers_tfidf)
+
+            print "applying dbscan on outliers..."
+            t4 = time.time()
+            clust_outliers = DBSCAN(eps=0.2, min_samples=5,
+                                    metric="precomputed")
+            clust_outliers.fit(dist_outliers)
+            print time.time() - t4
+            outliers_preds = clust_outliers.labels_
+
+        # write main pass clusters
         self._write_clusters(all_preds, all_idxs)
+
+        # outliers pass clusters
+        self._write_clusters(outliers_preds, outlier_idxs, suffix='Outliers')
 
 
 if __name__ == "__main__":
@@ -202,13 +254,17 @@ if __name__ == "__main__":
                    Time for nn lookup ~ 100s / 24691 ~ 4ms
 
     Q2: Clustering
-    'cases':  Time for dbscan ~ 2s
+    'cases':
+              Thresholds: 0.4, 5, 15, 20
+              Time for dbscan ~ 2s
               Time to build the search index ~ 0.5s
-              Time for nn lookup: 10.74s / 89999 ~  0.12ms
+              Time for nn lookup: 915s / 89999 ~ 10ms/item
 
-    'cell_phones':  Time for dbscan ~ 2s
-              Time to build the search index ~ 0.5s
-              Time for nn lookup: 10.74s / 89999 ~  0.12ms
+    'cell_phones':
+              Thresholds: 0.2, 5, 10, 5, 0.6
+              Time for dbscan ~ 3s
+              Time to build the search index ~ 1s
+              Time for nn lookup: 858s / 89999 ~  9.5ms
 
     'laptops':  Time for dbscan ~ 2s
               Time to build the search index ~ 0.5s
@@ -226,13 +282,13 @@ if __name__ == "__main__":
     if args.category in item_categories:
         c = Collection(args.category)
         print "Generating top 10 similar items...\n"
-        t1 = time.time()
-        c.top_similar_items()
-        print "time take for similarity: %s" % str(time.time()-t1)
+        # t1 = time.time()
+        # c.top_similar_items()
+        # print "time take for similarity: %s" % str(time.time()-t1)
 
         print "Clustering similar items together...\n"
         t2 = time.time()
-        c.generate_clusters()
+        c.generate_clusters(0.2, 5)
         print "time take for clustering: %s" % str(time.time()-t2)
     else:
         print "Incorrect category."
